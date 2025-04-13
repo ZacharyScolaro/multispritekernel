@@ -17,13 +17,21 @@ enum NumberSizeEnum
 	QuadSize
 };
 
+struct MissilesAndBall
+{
+	int Height;
+	int PositionX;
+	int PositionY;
+	uint8_t Color;
+};
+
 struct Sprite
 {
 	int Height;
 	int PositionX;
 	int PositionY;
 	int FramesSkipped; // Keep track of how many times the sprite was skipped
-	NumberSizeEnum NumberSize;
+	uint8_t NumberSize;
 	const uint8_t *pGraphics;
 	const uint8_t *pColors;
 };
@@ -45,6 +53,9 @@ public:
 	uint8_t PlayfieldColors[SCREEN_HEIGHT];
 	uint8_t PlayfieldGraphics[SCREEN_HEIGHT * 5]; // 40 bits per line
 	Sprite *Sprites[MAX_SPRITES];
+	MissilesAndBall M0;
+	MissilesAndBall M1;
+	MissilesAndBall BL;
 
 	void Render();
 
@@ -53,7 +64,9 @@ private:
 	uint8_t colup0Buffer[SCREEN_HEIGHT]; // D0 is used to flag Sprite Boundary, D7: 0-start, 1-end, D6..D1: SpriteMove index
 	uint8_t grp1Buffer[SCREEN_HEIGHT];
 	uint8_t colup1Buffer[SCREEN_HEIGHT];
+	uint8_t enam0m1blBuffer[SCREEN_HEIGHT]; // SEOOSEOO where S-Scheduled, E-Enabled, O-Object(0-M0, 1-M1, 2-BL) D0-D3 is first write, D4-D7 is second
 	SpriteMove Moves[MAX_SPRITES];
+	void scheduleMissilesBall(uint8_t object, MissilesAndBall *m, uint8_t *pGraphics, uint8_t *pColors);
 };
 
 void gameLoop();
@@ -79,7 +92,14 @@ void gameLoop()
 		kernel.PlayfieldColors[i] = (256 - i) | 0x8;
 		for (int j = 0; j < 5; j++)
 		{
-			kernel.PlayfieldGraphics[i * 5 + j] = (j & 1) ? i : ~i;
+			if (i < 90 || i > 110)
+			{
+				kernel.PlayfieldGraphics[i * 5 + j] = (j & 1) ? i : ~i;
+			}
+			else
+			{
+				kernel.PlayfieldGraphics[i * 5 + j] = 0;
+			}
 		}
 	}
 
@@ -110,7 +130,7 @@ void gameLoop()
 
 	Sprite s3;
 	s3.Height = 10;
-	s3.NumberSize = NumberSizeEnum::TwoCopiesWide;
+	s3.NumberSize = NumberSizeEnum::TwoCopiesWide | 0x30;
 	s3.pColors = spriteColors;
 	s3.pGraphics = spriteGraphics;
 	s3.PositionX = 140;
@@ -120,6 +140,22 @@ void gameLoop()
 	kernel.Sprites[1] = &s1;
 	kernel.Sprites[2] = &s2;
 	kernel.Sprites[3] = &s3;
+
+	// M0
+	kernel.M0.Height = 30;
+	kernel.M0.PositionX = 50;
+	kernel.M0.PositionY = 65;
+	kernel.M0.Color = 0x24;
+	// M1
+	kernel.M1.Height = 10;
+	kernel.M1.PositionX = 50;
+	kernel.M1.PositionY = 85;
+	kernel.M1.Color = 0x50;
+	// BL
+	kernel.BL.Height = 10;
+	kernel.BL.PositionX = 50;
+	kernel.BL.PositionY = 85;
+	kernel.BL.Color = 0x6c;
 
 	while (1)
 	{
@@ -141,12 +177,12 @@ void gameLoop()
 		{
 			s1.PositionX = 159;
 		}
-		s2.PositionX+=2;
+		s2.PositionX += 2;
 		if (s2.PositionX > 159)
 		{
 			s2.PositionX = 0;
 		}
-		s3.PositionX-=2;
+		s3.PositionX -= 2;
 		if (s3.PositionX < 0)
 		{
 			s3.PositionX = 159;
@@ -180,6 +216,7 @@ void MultiSpriteKernel::Render()
 		grp1Buffer[i] = 0;
 		colup0Buffer[i] = 0;
 		colup1Buffer[i] = 0;
+		enam0m1blBuffer[i] = 0;
 	}
 
 	// Calculate Sprite positioning
@@ -305,6 +342,11 @@ void MultiSpriteKernel::Render()
 		}
 	}
 
+	// Calculate Missile 0
+	scheduleMissilesBall(0, &M0, grp0Buffer, colup0Buffer);
+	scheduleMissilesBall(1, &M1, grp1Buffer, colup1Buffer);
+	scheduleMissilesBall(2, &BL, PlayfieldGraphics, PlayfieldColors);
+
 	// Transfer control back to ARM
 	// TIMING MATTERS FROM HERE ON OUT
 	vcsEndOverblank();
@@ -322,7 +364,10 @@ void MultiSpriteKernel::Render()
 	vcsWrite5(HMP1, 0x80);
 	vcsSta3(RESPONE);
 	vcsLda2(grp0Buffer[0]);
-	vcsNop2n(19);
+	vcsWrite5(HMM0, 0x80);
+	vcsSta4(HMM1);
+	vcsSta3(HMBL);
+	vcsNop2n(13);
 	SpriteMove &move = Moves[0];
 	int moveOffset = -1;
 	for (int line = 0;;)
@@ -379,38 +424,73 @@ void MultiSpriteKernel::Render()
 			vcsSta3(move.RespRegister);
 		}
 		vcsWrite5(PF2, ReverseByte[(uint8_t)((PlayfieldGraphics[line * 5 + 1] << 4) | (PlayfieldGraphics[line * 5 + 2] >> 4))]);
-		vcsWrite5(PF0, ReverseByte[PlayfieldGraphics[line * 5 + 2]]);
+		vcsLdy2(ReverseByte[PlayfieldGraphics[line * 5 + 2]] | 2);
+		vcsSty3(PF0);
 		if (moveOffset == 2)
 		{
 			vcsSta3(move.RespRegister);
 		}
-		vcsJmp3();
-		vcsNop2();
+		if (moveOffset > 0)
+		{
+			vcsLdx2(move.HmoveFirst);
+		}
+		else if (moveOffset == 0)
+		{
+			vcsLdx2(move.HmoveSecond);
+		}
+		else
+		{
+			vcsLdx2(0);
+		}
+
+		// First write to enable M/BL
+		if (enam0m1blBuffer[line] & 8)
+		{
+			if (enam0m1blBuffer[line] & 4)
+			{
+				vcsSty3(ENAM0 + (enam0m1blBuffer[line] & 3));
+			}
+			else
+			{
+				vcsStx3(ENAM0 + (enam0m1blBuffer[line] & 3));
+			}
+		}
+		else
+		{
+			vcsJmp3();
+		}
+
 		vcsWrite5(PF1, PlayfieldGraphics[line * 5 + 3]);
 		if (moveOffset == 3)
 		{
 			vcsSta3(move.RespRegister);
 		}
-		vcsNop2();
-		if (moveOffset > 0)
+
+		// Second write to enable M/BL
+		if (enam0m1blBuffer[line] & 0x80)
 		{
-			vcsLda2(move.HmoveFirst);
-		}
-		else if (moveOffset == 0)
-		{
-			vcsLda2(move.HmoveSecond);
+			if (enam0m1blBuffer[line] & 0x40)
+			{
+				vcsSty3(ENAM0 + ((enam0m1blBuffer[line] >> 4) & 3));
+			}
+			else
+			{
+				vcsStx3(ENAM0 + ((enam0m1blBuffer[line] >> 4) & 3));
+			}
 		}
 		else
 		{
-			vcsNop2();
+			vcsJmp3();
 		}
+		
+		vcsNop2();
 		if (moveOffset >= 0)
 		{
-			vcsSta4(move.RespRegister + 0x10);
+			vcsStx3(move.RespRegister + 0x10);
 		}
 		else
 		{
-			vcsNop2n(2);
+			vcsJmp3();
 		}
 		if (moveOffset == 4)
 		{
@@ -442,4 +522,71 @@ void MultiSpriteKernel::Render()
 	vcsWrite5(VBLANK, 2);
 
 	vcsStartOverblank();
+}
+
+void MultiSpriteKernel::scheduleMissilesBall(uint8_t object, MissilesAndBall *m, uint8_t *pGraphics, uint8_t *pColors)
+{
+	int start = SCREEN_HEIGHT;
+	int end = SCREEN_HEIGHT - 1;
+	for (int j = m->PositionY; j < SCREEN_HEIGHT; j++)
+	{
+		start = j;
+		if (0 == enam0m1blBuffer[j])
+		{
+			// No objects taken yet
+			enam0m1blBuffer[j] = object | 0xc;
+			break;
+		}
+		else if ((enam0m1blBuffer[j] & 0x80) == 0)
+		{
+			// Only first slot taken
+			enam0m1blBuffer[j] |= (object | 0xc) << 4;
+			break;
+		}
+	}
+	for (int j = m->PositionY + m->Height; j < SCREEN_HEIGHT; j++)
+	{
+		if (j > start)
+		{
+			end = j;
+			if (0 == enam0m1blBuffer[j])
+			{
+				// No objects taken yet
+				enam0m1blBuffer[j] = object | 0x8;
+				break;
+			}
+			else if ((enam0m1blBuffer[j] & 7) == 3)
+			{
+				// Only first slot taken
+				enam0m1blBuffer[j] |= (object | 0x8) << 4;
+				break;
+			}
+		}
+	}
+	for (int j = start; j < end; j++)
+	{
+		if (object == 2)
+		{
+			bool useColor = true;
+			for (int k = 0; k < 5; k++)
+			{
+				if (pGraphics[j * 5 + k])
+				{
+					useColor = false;
+					break;
+				}
+			}
+			if (useColor)
+			{
+				pColors[j] = m->Color;
+			}
+		}
+		else
+		{
+			if (pGraphics[j] == 0)
+			{
+				pColors[j] = m->Color;
+			}
+		}
+	}
 }
